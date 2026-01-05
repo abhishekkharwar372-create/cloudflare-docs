@@ -1,0 +1,402 @@
+---
+title: Interactive terminals
+pcx_content_type: how-to
+sidebar:
+  order: 11
+description: Create interactive terminal sessions with PTY support for shells, editors, and TUI applications.
+---
+
+import { TypeScriptExample } from "~/components";
+
+This guide shows you how to create interactive terminal sessions using PTY (pseudo-terminal) support. PTY enables terminal emulation with features like interactive shells, text editors, and terminal user interface (TUI) applications.
+
+## Before you begin
+
+PTY support requires sandbox image version **0.7.0 or later**. Ensure your Wrangler configuration references a compatible image version.
+
+## Choose between exec and PTY
+
+Use the right tool for your use case:
+
+- **`exec()`** - Run commands that complete and exit. Best for builds, scripts, and one-time operations.
+- **PTY** - Interactive terminal sessions. Best for shells, editors, REPLs, and TUI applications.
+
+:::note
+PTY is designed for interactive use cases where users type commands and see results in real-time. For automated command execution, use [`exec()`](/sandbox/api/commands/) instead.
+:::
+
+## Create a terminal session
+
+Create a PTY session with configurable dimensions:
+
+<TypeScriptExample>
+```
+import { getSandbox } from '@cloudflare/sandbox';
+
+const sandbox = getSandbox(env.Sandbox, 'my-sandbox', {
+  useWebSocket: true  // Enable WebSocket for real-time communication
+});
+
+const pty = await sandbox.pty.create({
+  cols: 80,    // Terminal width in columns
+  rows: 24,    // Terminal height in rows
+  command: ['/bin/bash']  // Shell to run
+});
+```
+</TypeScriptExample>
+
+## Handle terminal output
+
+Subscribe to output events to display terminal data:
+
+<TypeScriptExample>
+```
+// Listen for terminal output
+pty.onData((data) => {
+  // data contains terminal output including ANSI escape sequences
+  terminal.write(data);
+});
+
+// Handle process exit
+pty.onExit((exitCode) => {
+  console.log(`Shell exited with code ${exitCode}`);
+  terminal.writeln(`\r\n[Process exited: ${exitCode}]`);
+});
+```
+</TypeScriptExample>
+
+## Send user input
+
+Forward keyboard input to the PTY:
+
+<TypeScriptExample>
+```
+// Send user input (fire-and-forget for interactive typing)
+terminal.onData((data) => {
+  pty.write(data);
+});
+
+// Send commands programmatically (with error handling)
+try {
+  await pty.write('echo "Hello from PTY"\n');
+} catch (err) {
+  console.error('Failed to send input:', err);
+}
+```
+</TypeScriptExample>
+
+## Resize terminal
+
+Update terminal dimensions when the browser window changes:
+
+<TypeScriptExample>
+```
+import { FitAddon } from '@xterm/addon-fit';
+
+const fitAddon = new FitAddon();
+terminal.loadAddon(fitAddon);
+
+// Initial fit
+fitAddon.fit();
+
+// Handle window resize
+window.addEventListener('resize', async () => {
+  fitAddon.fit();
+  await pty.resize(terminal.cols, terminal.rows);
+});
+```
+</TypeScriptExample>
+
+## Integrate with xterm.js
+
+Use xterm.js for terminal rendering in web browsers:
+
+<TypeScriptExample>
+```
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import '@xterm/xterm/css/xterm.css';
+
+// Create terminal
+const terminal = new Terminal({
+  cursorBlink: true,
+  fontSize: 14,
+  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  theme: {
+    background: '#1e1e1e',
+    foreground: '#d4d4d4'
+  }
+});
+
+// Add addons
+const fitAddon = new FitAddon();
+terminal.loadAddon(fitAddon);
+terminal.loadAddon(new WebLinksAddon());
+
+// Mount terminal
+terminal.open(document.getElementById('terminal'));
+fitAddon.fit();
+
+// Create PTY and connect
+const pty = await sandbox.pty.create({
+  cols: terminal.cols,
+  rows: terminal.rows
+});
+
+// Bidirectional data flow
+pty.onData((data) => terminal.write(data));
+terminal.onData((data) => pty.write(data));
+
+// Handle exit
+pty.onExit((exitCode) => {
+  terminal.writeln(`\r\n[Process exited with code ${exitCode}]`);
+});
+```
+</TypeScriptExample>
+
+## Send control characters
+
+Use control characters for terminal operations:
+
+<TypeScriptExample>
+```
+// Interrupt current process (Ctrl+C)
+await pty.write('\x03');
+
+// End of file (Ctrl+D)
+await pty.write('\x04');
+
+// Suspend process (Ctrl+Z)
+await pty.write('\x1A');
+
+// Clear screen (Ctrl+L)
+await pty.write('\x0C');
+```
+</TypeScriptExample>
+
+## Handle WebSocket lifecycle
+
+Manage WebSocket connections and reconnection:
+
+<TypeScriptExample>
+```
+// Store PTY ID for reconnection
+const ptyId = pty.id;
+
+// Close connection (PTY keeps running based on disconnect timeout)
+pty.close();
+
+// Reconnect later
+const reconnected = await sandbox.pty.getById(ptyId);
+
+// Resume data flow
+reconnected.onData((data) => terminal.write(data));
+terminal.onData((data) => reconnected.write(data));
+```
+</TypeScriptExample>
+
+## Attach PTY to session
+
+Inherit working directory and environment from an existing session:
+
+<TypeScriptExample>
+```
+// Create session with specific context
+const session = await sandbox.sessions.create({
+  cwd: '/workspace/project',
+  env: {
+    NODE_ENV: 'development',
+    PATH: '/usr/local/bin:/usr/bin:/bin'
+  }
+});
+
+// PTY inherits session's cwd and env
+const pty = await sandbox.pty.attach(session.id, {
+  cols: 80,
+  rows: 24
+});
+
+// Terminal starts in /workspace/project with custom environment
+```
+</TypeScriptExample>
+
+## Build a collaborative terminal
+
+Create a multi-user terminal where multiple users share the same PTY output:
+
+<TypeScriptExample>
+```
+// Server-side: Create PTY and broadcast output
+const pty = await sandbox.pty.create({ cols: 80, rows: 24 });
+
+// Store output history for new joiners
+let history = '';
+
+pty.onData((data) => {
+  history += data;
+
+  // Broadcast to all connected WebSocket clients
+  for (const client of connectedClients) {
+    client.send(JSON.stringify({ type: 'output', data }));
+  }
+});
+
+// Handle user input from any client
+function handleUserInput(data: string) {
+  pty.write(data);
+}
+
+// Send history to newly connected users
+function onNewUser(client: WebSocket) {
+  client.send(JSON.stringify({ type: 'history', data: history }));
+}
+```
+</TypeScriptExample>
+
+## List active PTY sessions
+
+Manage multiple terminal sessions:
+
+<TypeScriptExample>
+```
+// Create multiple sessions
+const pty1 = await sandbox.pty.create({ cols: 80, rows: 24 });
+const pty2 = await sandbox.pty.create({ cols: 120, rows: 40 });
+
+// List all active PTYs
+const activePtys = await sandbox.pty.list();
+
+for (const info of activePtys) {
+  console.log(`PTY ${info.id}: ${info.cols}x${info.rows}`);
+  if (info.sessionId) {
+    console.log(`  Attached to session: ${info.sessionId}`);
+  }
+}
+
+// Get specific PTY info
+const ptyInfo = await sandbox.pty.getInfo(pty1.id);
+console.log(`Terminal size: ${ptyInfo.cols}x${ptyInfo.rows}`);
+```
+</TypeScriptExample>
+
+## Terminate PTY sessions
+
+Clean up terminal sessions gracefully:
+
+<TypeScriptExample>
+```
+// Graceful termination (SIGTERM)
+await pty.kill();
+
+// Wait for exit
+const { exitCode } = await pty.exited;
+console.log(`Process exited with code ${exitCode}`);
+
+// Force termination if needed
+await pty.kill('SIGKILL');
+```
+</TypeScriptExample>
+
+## Use async iteration for scripting
+
+Process output programmatically using async iteration:
+
+<TypeScriptExample>
+```
+const pty = await sandbox.pty.create({ cols: 80, rows: 24 });
+
+// Send command
+await pty.write('ls -la\n');
+await pty.write('exit\n');
+
+// Collect output
+let output = '';
+for await (const chunk of pty) {
+  output += chunk;
+}
+
+console.log('Complete output:', output);
+```
+</TypeScriptExample>
+
+## Choose terminal dimensions
+
+Common terminal sizes for different use cases:
+
+<TypeScriptExample>
+```
+// Standard terminal (80x24)
+const standard = await sandbox.pty.create({ cols: 80, rows: 24 });
+
+// Wide terminal for code editors (120x40)
+const wide = await sandbox.pty.create({ cols: 120, rows: 40 });
+
+// Ultra-wide for dashboards (160x50)
+const ultraWide = await sandbox.pty.create({ cols: 160, rows: 50 });
+
+// Mobile-friendly (60x20)
+const mobile = await sandbox.pty.create({ cols: 60, rows: 20 });
+```
+</TypeScriptExample>
+
+:::note
+Terminal dimensions must be between 1 and 1000 for both columns and rows.
+:::
+
+## Configure terminal emulation
+
+PTY sessions use `xterm-256color` terminal emulation with full ANSI escape sequence support:
+
+- 256-color palette
+- Bold, italic, underline text styles
+- Cursor positioning and manipulation
+- Screen clearing and scrolling
+- Mouse event support (with xterm.js)
+
+<TypeScriptExample>
+```
+// Terminal automatically supports ANSI colors
+await pty.write('echo "\\x1b[31mRed text\\x1b[0m"\n');
+await pty.write('echo "\\x1b[1;32mBold green\\x1b[0m"\n');
+
+// Run TUI applications
+await pty.write('vim script.js\n');
+await pty.write('htop\n');
+await pty.write('nano README.md\n');
+```
+</TypeScriptExample>
+
+## Handle errors
+
+Detect and handle PTY errors:
+
+<TypeScriptExample>
+```
+try {
+  const pty = await sandbox.pty.create({ cols: 80, rows: 24 });
+
+  pty.onData((data) => terminal.write(data));
+
+  pty.onExit((exitCode) => {
+    if (exitCode !== 0) {
+      console.error(`Process failed with exit code ${exitCode}`);
+    }
+  });
+
+  // Send input with error handling
+  await pty.write('risky-command\n');
+
+} catch (err) {
+  console.error('PTY error:', err);
+  terminal.writeln('\\r\\n[Terminal session failed]');
+}
+```
+</TypeScriptExample>
+
+## Related resources
+
+- [PTY API reference](/sandbox/api/pty/)
+- [WebSocket connections guide](/sandbox/guides/websocket-connections/)
+- [Sessions API](/sandbox/api/sessions/)
+- [xterm.js documentation](https://xtermjs.org/)
